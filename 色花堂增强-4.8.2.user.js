@@ -1157,6 +1157,14 @@
                 border-top: 0 !important;
                 box-sizing: border-box !important;
             }
+            .bgsh-favorite-preview-row.bgsh-favorite-preview-li-row {
+                display: block !important;
+                padding: 0 10px 10px 10px !important;
+                margin: -4px 0 0 0 !important;
+                border-bottom: 1px solid #e8e8e8 !important;
+                background: #fff !important;
+                box-sizing: border-box !important;
+            }
             .bgsh-my-post-preview-host,
             .bgsh-favorite-preview-host {
                 display: block !important;
@@ -3367,6 +3375,26 @@
 
         function resolveAdvancedPreviewParent(el, tid) {
             if (isSpecialTablePreviewPage) {
+                if (isFavoriteListPreviewPage) {
+                    var listItem = el.closest("li");
+                    if (listItem && listItem.parentNode) {
+                        var existingLiHost = listItem.parentNode.querySelector(
+                            '[data-bgsh-preview-host-tid="' + tid + '"]'
+                        );
+                        if (existingLiHost) return existingLiHost;
+
+                        var liPreviewRow = document.createElement("div");
+                        liPreviewRow.className = "bgsh-favorite-preview-row bgsh-favorite-preview-li-row";
+                        liPreviewRow.dataset.bgshPreviewRowTid = tid;
+                        var liHost = document.createElement("div");
+                        liHost.className = "bgsh-favorite-preview-host";
+                        liHost.dataset.bgshPreviewHostTid = tid;
+                        liPreviewRow.appendChild(liHost);
+                        listItem.insertAdjacentElement("afterend", liPreviewRow);
+                        return liHost;
+                    }
+                }
+
                 var tableRow = el.closest("tr");
                 if (tableRow && tableRow.parentNode) {
                     var existingHost = tableRow.parentNode.querySelector(
@@ -6441,8 +6469,9 @@ function isBoardListPage() {
 
     // #region 收藏夹整理（合并自“色花堂收藏整理”，以增强脚本为主）
     function initFavoriteOrganizer() {
-        if (window.__bgshFavoriteOrganizerInitialized) return;
+        if (window.__bgshFavoriteOrganizerInitialized) return window.__bgshFavoriteOrganizerPromise || Promise.resolve();
         window.__bgshFavoriteOrganizerInitialized = true;
+        window.__bgshFavoriteOrganizerPromise = new Promise((resolve) => {
 
             // 1. 判断当前页面类型：黑名单机制，排查 forum 与 article
             function bgshFavoriteOrganizerIsTargetTypePage() {
@@ -6453,10 +6482,11 @@ function isBoardListPage() {
 
             if (!bgshFavoriteOrganizerIsTargetTypePage()) {
                 console.log('[Discuz全量收藏分类] 当前是版块/文章收藏页面，脚本跳过执行。');
+                resolve();
                 return;
             }
 
-            console.log('[色花堂增强收藏整理] 已合并启动，使用限流解析收藏详情...');
+            console.log('[色花堂增强收藏整理] 已合并启动，使用 20 线程解析收藏详情...');
 
             // 2. 自定义固定排序序列
             const SORT_ORDER = [
@@ -6525,15 +6555,20 @@ function isBoardListPage() {
             }
 
             // 轮询等待 DOM 加载
+            let organizerStarted = false;
             const timer = setInterval(() => {
                 const favUl = document.querySelector('#favorite_ul, .tbmu + ul, #ct ul, .ptm ul');
                 if (favUl) {
+                    organizerStarted = true;
                     clearInterval(timer);
-                    initAllPagesProcess(favUl);
+                    initAllPagesProcess(favUl).finally(resolve);
                 }
             }, 500);
 
-            setTimeout(() => clearInterval(timer), 10000);
+            setTimeout(() => {
+                clearInterval(timer);
+                if (!organizerStarted) resolve();
+            }, 10000);
 
             async function initAllPagesProcess(favContainer) {
                 const cacheMap = bgshFavoriteOrganizerGetCache();
@@ -6570,17 +6605,17 @@ function isBoardListPage() {
                     statusMsg.innerHTML = `⚡ <b>已从本地缓存秒级加载 ${rawThreads.length} 个收藏数据！</b>`;
                     setTimeout(() => statusMsg.remove(), 2500);
                 } else {
-                    statusMsg.innerHTML = `📦 发现 <b>${unchachedThreads.length}</b> 个新帖子，正在限流解析元数据...`;
+                    statusMsg.innerHTML = `📦 发现 <b>${unchachedThreads.length}</b> 个新帖子，正在 20 线程解析元数据...`;
                 }
 
                 let completed = 0;
                 const totalUncached = unchachedThreads.length;
-                const detailFetchDelay = 1200;
-                const bgshFavoriteOrganizerSleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+                const detailFetchConcurrency = 20;
 
-                // 收藏夹帖子详情采用串行限流抓取，避免短时间大量详情请求触发 Cloudflare 风控。
+                // 收藏夹帖子详情采用 20 线程抓取，所有详情完成后再继续触发图片预览。
                 const metaResults = [];
-                for (let index = 0; index < rawThreads.length; index++) {
+                let nextThreadIndex = 0;
+                async function bgshFavoriteOrganizerFetchThreadMeta(index) {
                     const thread = rawThreads[index];
                     let meta = cacheMap[thread.url];
 
@@ -6594,7 +6629,6 @@ function isBoardListPage() {
                         };
 
                         try {
-                            if (completed > 0) await bgshFavoriteOrganizerSleep(detailFetchDelay);
                             const res = await fetch(thread.url, { credentials: 'include' });
                             const html = await res.text();
                             const parser = new DOMParser();
@@ -6639,6 +6673,16 @@ function isBoardListPage() {
                     }
                     metaResults[index] = meta;
                 }
+
+                async function bgshFavoriteOrganizerDetailWorker() {
+                    while (nextThreadIndex < rawThreads.length) {
+                        const index = nextThreadIndex++;
+                        await bgshFavoriteOrganizerFetchThreadMeta(index);
+                    }
+                }
+
+                const workerCount = Math.min(detailFetchConcurrency, Math.max(1, rawThreads.length));
+                await Promise.all(Array.from({ length: workerCount }, () => bgshFavoriteOrganizerDetailWorker()));
 
                 // 按原始收藏顺序填充 DOM
                 rawThreads.forEach((thread, index) => {
@@ -6997,6 +7041,10 @@ function isBoardListPage() {
                         } else {
                             item.liNode.style.display = 'none';
                         }
+                        const previewRow = item.liNode.nextElementSibling;
+                        if (previewRow && previewRow.classList && previewRow.classList.contains('bgsh-favorite-preview-li-row')) {
+                            previewRow.style.display = (matchForum && matchSearch) ? 'block' : 'none';
+                        }
 
                         if (item.linkNode) {
                             if (currentSearchKey) {
@@ -7026,6 +7074,8 @@ function isBoardListPage() {
             function bgshFavoriteOrganizerGetTotalCount() {
                 return Object.values(forumData).reduce((sum, arr) => sum + arr.length, 0);
             }
+        });
+        return window.__bgshFavoriteOrganizerPromise;
     }
     // #endregion
 
@@ -7048,9 +7098,9 @@ async function delegatePageHandlers(settings, buttonContainer) {
     } else if (isForumDisplayPage()) {
         await handleForumDisplayPage(settings, buttonContainer);
     } else if (isFavoriteListPage()) {
-        initFavoriteOrganizer();
+        await initFavoriteOrganizer();
         // 收藏夹列表沿用其他帖子列表的图片预览开关、每帖预览数量和预览图尺寸设置。
-        setTimeout(function() { displayAdvanThreadImages(settings); }, 500);
+        await displayAdvanThreadImages(settings);
     } else if (isSpacePage()) {
         displayThreadBuyInfoOther(settings);
         initInfiniteScroll("isSpacePage");
