@@ -3376,8 +3376,9 @@
         function resolveAdvancedPreviewParent(el, tid) {
             if (isSpecialTablePreviewPage) {
                 if (isFavoriteListPreviewPage) {
-                    var listItem = el.closest("li");
+                    var listItem = el.closest("li") || document.querySelector('[data-bgsh-favorite-tid="' + tid + '"]');
                     if (listItem && listItem.parentNode) {
+                        listItem.dataset.bgshFavoriteTid = tid;
                         var existingLiHost = listItem.parentNode.querySelector(
                             '[data-bgsh-preview-host-tid="' + tid + '"]'
                         );
@@ -3386,6 +3387,7 @@
                         var liPreviewRow = document.createElement("div");
                         liPreviewRow.className = "bgsh-favorite-preview-row bgsh-favorite-preview-li-row";
                         liPreviewRow.dataset.bgshPreviewRowTid = tid;
+                        liPreviewRow.dataset.bgshFavoriteTid = tid;
                         var liHost = document.createElement("div");
                         liHost.className = "bgsh-favorite-preview-host";
                         liHost.dataset.bgshPreviewHostTid = tid;
@@ -6631,6 +6633,11 @@ function isBoardListPage() {
                         try {
                             const res = await fetch(thread.url, { credentials: 'include' });
                             const html = await res.text();
+                            const isCloudflareBlocked = !res.ok ||
+                                /cloudflare|cf-chl|cf_clearance|Just a moment|Attention Required|Access denied|安全检查|人机验证/i.test(html);
+                            if (isCloudflareBlocked) {
+                                throw new Error('favorite detail blocked by Cloudflare');
+                            }
                             const parser = new DOMParser();
                             const doc = parser.parseFromString(html, 'text/html');
 
@@ -6661,8 +6668,10 @@ function isBoardListPage() {
                                 meta.views = numEls[0].innerText.trim();
                             }
 
-                            // 写入缓存
-                            cacheMap[thread.url] = meta;
+                            // 写入缓存；Cloudflare 风控/拦截页不会写入“未知版块”，下次进入自动重新获取。
+                            if (meta.forumName !== '未知版块') {
+                                cacheMap[thread.url] = meta;
+                            }
                         } catch (err) {
                         } finally {
                             completed++;
@@ -6695,6 +6704,8 @@ function isBoardListPage() {
 
                     const linkNode = thread.liNode.querySelector('a[href*="thread-"], a[href*="mod=viewthread"]');
                     const rawTitle = linkNode ? linkNode.innerText.trim() : '';
+                    const tid = thread.tid || extractTid(thread.url);
+                    if (tid) thread.liNode.dataset.bgshFavoriteTid = tid;
 
                     // 重构单个条目 DOM
                     bgshFavoriteOrganizerRebuildListItem(thread.liNode, linkNode, forumName, meta);
@@ -6703,7 +6714,8 @@ function isBoardListPage() {
                         liNode: thread.liNode,
                         linkNode: linkNode,
                         rawTitle: rawTitle,
-                        url: thread.url
+                        url: thread.url,
+                        tid: tid
                     });
 
                     favContainer.appendChild(thread.liNode);
@@ -6722,6 +6734,7 @@ function isBoardListPage() {
 
                 // 渲染侧栏
                 bgshFavoriteOrganizerRenderLeftMenu();
+                bgshFavoriteOrganizerBindScopedSelectAll();
             }
 
             // 渲染紧凑版表头（列宽与内容完全精准对齐）
@@ -6744,7 +6757,7 @@ function isBoardListPage() {
                     <div style="flex: 1; min-width: 0; padding-left: 5px; text-align: left;">帖子标题</div>
                     <div style="width: 110px; flex-shrink: 0; text-align: left;">作者 / 发帖时间</div>
                     <div style="width: 70px; flex-shrink: 0; text-align: left;">回复 / 查看</div>
-                    <div style="width: 40px; flex-shrink: 0; text-align: right;">操作</div>
+                    <div style="width: 70px; flex-shrink: 0; text-align: right;">操作</div>
                 `;
                 container.appendChild(headerLi);
             }
@@ -6761,8 +6774,12 @@ function isBoardListPage() {
                     box-sizing: border-box !important;
                 `;
 
-                // 提取原有的“删除”按钮
-                const extraOps = liNode.querySelector('.y, .xg1, input[type="checkbox"], a[href*="op=delete"]');
+                // 保留原生复选框与删除操作，避免破坏网站底部批量操作。
+                const preservedOps = Array.from(new Set([
+                    ...liNode.querySelectorAll('input[type="checkbox"]'),
+                    ...liNode.querySelectorAll('a[href*="op=delete"]'),
+                    ...liNode.querySelectorAll('.y')
+                ])).filter(node => node && node !== linkNode && !(linkNode && node.contains(linkNode)));
 
                 // 左侧标题区（弹性自适应最大化）
                 const leftBox = document.createElement('div');
@@ -6805,12 +6822,13 @@ function isBoardListPage() {
 
                 // 操作列（40px 居右对齐）
                 const opCol = document.createElement('div');
-                opCol.style.cssText = 'width: 40px; flex-shrink: 0; text-align: right; font-size: 11px;';
-                if (extraOps) {
-                    extraOps.style.float = 'none';
-                    extraOps.style.display = 'inline-block';
-                    opCol.appendChild(extraOps);
-                }
+                opCol.style.cssText = 'width: 70px; flex-shrink: 0; text-align: right; font-size: 11px;';
+                preservedOps.forEach(op => {
+                    op.style.float = 'none';
+                    op.style.display = 'inline-block';
+                    op.style.marginLeft = '4px';
+                    opCol.appendChild(op);
+                });
 
                 liNode.innerHTML = '';
                 liNode.appendChild(leftBox);
@@ -6861,7 +6879,7 @@ function isBoardListPage() {
                 const curPageResults = [];
                 currentPageItems.forEach(li => {
                     const link = li.querySelector('a[href*="thread-"], a[href*="mod=viewthread"]');
-                    if (link) curPageResults.push({ liNode: li, url: link.href });
+                    if (link) curPageResults.push({ liNode: li, url: link.href, tid: extractTid(link.href) });
                 });
                 pageMap[currentPageNum] = curPageResults;
 
@@ -6881,7 +6899,7 @@ function isBoardListPage() {
                                 let pageResults = [];
                                 items.forEach(li => {
                                     const link = li.querySelector('a[href*="thread-"], a[href*="mod=viewthread"]');
-                                    if (link) pageResults.push({ liNode: li, url: link.href });
+                                    if (link) pageResults.push({ liNode: li, url: link.href, tid: extractTid(link.href) });
                                 });
                                 return { page: p, results: pageResults };
                             })
@@ -7041,9 +7059,13 @@ function isBoardListPage() {
                         } else {
                             item.liNode.style.display = 'none';
                         }
-                        const previewRow = item.liNode.nextElementSibling;
+                        const previewRow = (item.tid && document.querySelector('.bgsh-favorite-preview-li-row[data-bgsh-preview-row-tid="' + item.tid + '"]')) ||
+                            item.liNode.nextElementSibling;
                         if (previewRow && previewRow.classList && previewRow.classList.contains('bgsh-favorite-preview-li-row')) {
                             previewRow.style.display = (matchForum && matchSearch) ? 'block' : 'none';
+                        }
+                        if (!(matchForum && matchSearch)) {
+                            item.liNode.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = false; });
                         }
 
                         if (item.linkNode) {
@@ -7069,6 +7091,48 @@ function isBoardListPage() {
                         span.innerText = `(${counts[forumName]})`;
                     }
                 });
+                bgshFavoriteOrganizerSyncScopedSelectAllState();
+            }
+
+            function bgshFavoriteOrganizerGetVisibleFavoriteCheckboxes() {
+                return Object.values(forumData).flat().filter(item => {
+                    return item.liNode && item.liNode.style.display !== 'none';
+                }).flatMap(item => Array.from(item.liNode.querySelectorAll('input[type="checkbox"]')));
+            }
+
+            function bgshFavoriteOrganizerSyncScopedSelectAllState() {
+                document.querySelectorAll('input[name="chkall"], input[id*="chkall"], input[onclick*="checkall"]').forEach(controller => {
+                    const visibleCheckboxes = bgshFavoriteOrganizerGetVisibleFavoriteCheckboxes()
+                        .filter(cb => cb !== controller && !cb.disabled);
+                    controller.title = '全选当前选中板块下的帖子';
+                    controller.checked = visibleCheckboxes.length > 0 && visibleCheckboxes.every(cb => cb.checked);
+                });
+            }
+
+            function bgshFavoriteOrganizerBindScopedSelectAll() {
+                const controllers = document.querySelectorAll('input[name="chkall"], input[id*="chkall"], input[onclick*="checkall"]');
+                controllers.forEach(controller => {
+                    if (controller.dataset.bgshScopedSelectAll === '1') return;
+                    controller.dataset.bgshScopedSelectAll = '1';
+                    controller.title = '全选当前选中板块下的帖子';
+                    controller.addEventListener('click', event => {
+                        event.stopPropagation();
+                    }, true);
+                    controller.addEventListener('change', event => {
+                        event.stopPropagation();
+                        const checked = controller.checked;
+                        const visibleCheckboxes = bgshFavoriteOrganizerGetVisibleFavoriteCheckboxes()
+                            .filter(cb => cb !== controller && !cb.disabled);
+                        Object.values(forumData).flat().forEach(item => {
+                            item.liNode.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                                if (cb !== controller && !cb.disabled) cb.checked = false;
+                            });
+                        });
+                        visibleCheckboxes.forEach(cb => { cb.checked = checked; });
+                        bgshFavoriteOrganizerSyncScopedSelectAllState();
+                    }, true);
+                });
+                bgshFavoriteOrganizerSyncScopedSelectAllState();
             }
 
             function bgshFavoriteOrganizerGetTotalCount() {
